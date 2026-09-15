@@ -1,65 +1,64 @@
 # Market research agent
 
-A Streamlit application built around a cyclic LangGraph orchestrator. It discovers up to three competitors, researches each competitor one at a time, and renders source-backed competitor reports. The app uses You.com Search and News when `YOUCOM_API_KEY` is configured and deterministic local fixtures when it is not.
+A Streamlit application built around a cyclic LangGraph orchestrator. It discovers up to three competitors for a given company, researches each competitor one at a time using You.com web and news search, and uses a Groq-hosted LLM to turn the raw evidence into a structured competitor report.
 
-The current build is intentionally review-oriented: it surfaces evidence, pricing signals, positioning, features, news, sources, and confidence. It does not make business decisions or persist user data.
+The current build requires both a Groq API key and a You.com API key. If either is missing, the app shows an error and does not run the pipeline; if the LLM call fails for a step, that step falls back to a fixed offline report so the run still completes.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    UI[Streamlit UI\napp.py] --> FORM[Research form]
-    FORM --> LOOP[LangGraph run_market_research]
-    LOOP --> DISCOVER[Discovery node\ncreate competitor queue]
-    DISCOVER --> WEB[web_search_tool]
-    LOOP --> RESEARCH[Researcher node\nconsume one queue item]
-    RESEARCH --> WEB2[web_search_tool\npricing/features/positioning]
-    RESEARCH --> NEWS[news_search_tool\nlaunches/announcements]
-    WEB --> API[You.com Search API]
-    NEWS --> API2[You.com Search API]
-    API --> FALLBACK[Local fixtures on missing key or request failure]
-    API2 --> FALLBACK
-    WEB2 --> REPORT[Analyst node\nCompetitorReport dataclass]
-    NEWS --> REPORT
-    FALLBACK --> REPORT
-    REPORT --> ROUTER[Queue router]
+    UI[Streamlit UI\napp.py] --> BTN[Run Research Pipeline button]
+    BTN --> GRAPH[LangGraph StateGraph]
+    GRAPH --> DISCOVER[Discovery node\nGroq LLM extracts 3 competitors]
+    DISCOVER --> WEB0[youcom_web_search]
+    WEB0 --> API[You.com Search API]
+    GRAPH --> RESEARCH[Researcher node\npops one competitor from queue]
+    RESEARCH --> WEB[youcom_web_search\npricing/features/positioning]
+    RESEARCH --> NEWS[youcom_news_search\nlaunches/announcements]
+    WEB --> API
+    NEWS --> API
+    RESEARCH --> ANALYST[Analyst node\nGroq LLM structured output]
+    ANALYST --> ROUTER[Queue router]
     ROUTER -->|competitors remain| RESEARCH
     ROUTER -->|queue empty| CARDS[Streamlit competitor cards]
 ```
 
 ## Runtime flow
 
-1. The user enters a company or product name in the Streamlit form.
-2. `run_market_research()` validates the name and invokes `LangGraphMarketResearchFlow`.
-3. The discovery node searches for five candidate results and keeps the first three in `competitor_queue`.
-4. The researcher node pops one competitor and calls the web and news tools.
-5. Each candidate receives separate web and news searches.
-6. The analyst node converts that evidence into one `CompetitorReport` dataclass and appends it to `final_reports`.
-7. Streamlit renders confidence, summary, positioning, features, pricing, recent news, and source links.
-8. The UI displays graph events and stores the latest result in session state.
+1. The user enters a company or product name in the Streamlit form and clicks **Run Research Pipeline**.
+2. The app checks that `GROQ_API_KEY` and `YOUCOM_API_KEY` are both set before starting.
+3. The discovery node asks the Groq LLM to extract exactly three named competitors from a You.com web search.
+4. The researcher node pops one competitor off the queue and runs a web search and a news search for it via You.com.
+5. The analyst node asks the Groq LLM to turn that raw evidence into a structured `CompetitorReport` (pricing, features, positioning, recent news); if the LLM call fails, a fixed fallback report is used instead so the run still completes.
+6. The queue router sends the graph back to the researcher node until the competitor queue is empty, then ends the run.
+7. Streamlit renders one expandable card per competitor with pricing, market position, core features, and recent news.
 
 ## Project layout
 
 ```text
 MARKET_RESEARCH_AGENT/
-├── app.py                 # Streamlit entrypoint and report-card UI
-├── youcom_client.py       # You.com client and local fallback fixtures
-├── youcom_tools.py        # LangChain-compatible tools and legacy workflow API
-├── schemas.py             # Dataclass contracts, including CompetitorReport
-├── security.py            # Input validation and text sanitization
-├── langgraph_workflow.py  # Discovery/research/analyst graph and queue router
-├── graph.py               # Older typed pipeline retained for compatibility
-├── streamlit_app.py       # Older Streamlit entrypoint retained for compatibility
-├── test_architecture.py   # Contract and typed-pipeline tests
-├── test_market_agent.py   # Client/tool compatibility tests
-├── requirements.txt       # Runtime and test dependencies
-├── .env.example           # Safe API-key configuration template
-└── .env                   # Local secrets; do not commit this file
+├── app.py                     # Streamlit entrypoint: LangGraph pipeline, Groq nodes, report cards
+├── youcom_client.py           # You.com Search API client (requires YOUCOM_API_KEY)
+├── youcom_tools.py            # LangChain tools (youcom_web_search/news_search) and legacy MarketResearchWorkflow
+├── langgraph_workflow.py      # Older queue-based LangGraph flow (schemas/security-based), retained for compatibility
+├── graph.py                   # Older typed pipeline retained for compatibility
+├── streamlit_app.py           # Older Streamlit entrypoint retained for compatibility
+├── schemas.py                 # Dataclass contracts used by the legacy workflow
+├── security.py                # Input validation and text sanitization used by the legacy workflow
+├── test_architecture.py       # Contract and typed-pipeline tests
+├── test_market_agent.py       # Client/tool compatibility tests
+├── generate_design_doc.py     # Generates the .docx design/architecture documents
+├── requirements.txt           # Runtime and test dependencies
+├── .env.example                # Safe API-key configuration template
+└── .env                        # Local secrets; not committed (see .gitignore)
 ```
+
+`app.py` is the active entrypoint. `langgraph_workflow.py`, `graph.py`, and `streamlit_app.py` are earlier iterations of the same idea kept around for reference and their existing tests.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and replace the placeholder with a real You.com API key:
+Copy `.env.example` to `.env` and fill in real keys:
 
 ```powershell
 Copy-Item .env.example .env
@@ -68,17 +67,16 @@ Copy-Item .env.example .env
 Then edit `.env`:
 
 ```env
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_API_KEY=your_real_groq_api_key
 YOUCOM_API_KEY=your_real_youcom_api_key
 ```
 
-The client also accepts `YOUCOM_API_KEY` from the process environment. The application never prints the key.
+- `GROQ_API_KEY` — required to run discovery and analysis with an LLM.
+- `GROQ_MODEL` — optional, defaults to `llama-3.3-70b-versatile` if unset.
+- `YOUCOM_API_KEY` — required for web and news search; the client raises an error at startup if it's missing.
 
-### Live and offline modes
-
-- With a non-empty `YOUCOM_API_KEY`, web and news searches call the You.com endpoint.
-- Without a key, the app uses local fixture records for Notion AI, Airtable, HubSpot, Intercom, and Zapier.
-- If a live request fails, the client falls back to local fixtures for that search.
-- The sidebar displays whether live You.com Search and News are enabled.
+Neither key is ever printed by the app. `.env` is excluded from version control via `.gitignore`.
 
 ## Setup and usage
 
@@ -98,35 +96,22 @@ pip install -r requirements.txt
 Start the app:
 
 ```powershell
-streamlit run app.py --server.port 8501
+streamlit run app.py
 ```
 
-Open [http://localhost:8501](http://localhost:8501), enter a company or product name such as `Anthropic Claude`, and select **Run research pipeline**.
+Open [http://localhost:8501](http://localhost:8501), enter a company or product name such as `Anthropic Claude`, and click **Run Research Pipeline**.
 
 ## Reports and evidence
 
-`CompetitorReport` includes:
+Each competitor card shows:
 
-- competitor name and website
-- evidence summary
-- inferred positioning
-- notable features
-- pricing signal
-- recent news records
-- source URLs
-- research timestamp
-- confidence level
+- competitor name
+- pricing model
+- core features (3-5)
+- market positioning
+- recent news
 
-The current analyst node is deterministic and does not call an LLM. This keeps local runs reproducible while preserving the structured analyst boundary shown in the architecture.
-
-## Tools and compatibility
-
-`youcom_tools.py` exposes two LangChain-compatible tools:
-
-- `youcom_web_search`
-- `youcom_news_search`
-
-It also exposes raw `web_search_tool` and `news_search_tool` functions used by the researcher node, and retains `MarketResearchWorkflow` for older callers. The main current UI uses `LangGraphMarketResearchFlow` from `langgraph_workflow.py`.
+If the Groq structured-output call fails for a competitor, the analyst node falls back to a fixed offline report for that competitor so the pipeline still completes end to end.
 
 ## Testing
 
@@ -142,11 +127,12 @@ Compile the main modules:
 python -m py_compile app.py youcom_client.py youcom_tools.py
 ```
 
+Note: some tests in `test_market_agent.py` (offline fixture behavior for `YouComClient`) were written against an earlier version of `youcom_client.py` that returned local fixtures when no API key was set; the current client raises an error instead, so those specific assertions no longer apply.
+
 ## Security and limitations
 
 - Keep `.env` private and never commit real API keys.
-- Company names are validated before research begins.
-- Text added to typed reports is sanitized before rendering.
+- Company names are used directly in search queries and LLM prompts; no separate sanitization layer runs in the current `app.py` flow.
 - Search results and inferred positioning should be reviewed by a person.
-- The lightweight client uses heuristic normalization and does not crawl full competitor pages.
-- API failures intentionally fall back to fixtures so local development remains usable.
+- The You.com client uses a single search endpoint and does not crawl full competitor pages.
+- The app requires both API keys to run; there is no fully offline mode in the current build.
